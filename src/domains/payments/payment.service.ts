@@ -25,7 +25,6 @@ import { logger } from '../../utils/logger';
 import { sanitizePageSize, sanitizePageNumber, parseSortParameters } from '../../utils/pagination';
 import { paginateWithCursor } from '../../db/pagination';
 import { WebhookService } from '../webhooks/webhook.service';
-import { buildTipMemo, validateMemo, validatePaymentAmount } from '../../lib/stellar/validation';
 import { config } from '../../config/env';
 import { MAX_MEDIA_PER_TIP, type MediaView } from '../media/media.types';
 import { buildCdnUrl } from '../media/media.storage';
@@ -33,6 +32,8 @@ import { TIP_VISIBLE_STATE } from '../moderation/moderation.types';
 import { TipFilterInput, buildTipWhere, describeTipFilters } from './tip-filters';
 import { invalidateCaches, tipCacheKeys } from '../../lib/cache/invalidation';
 import { withJobTracePayload } from '../../lib/requestContext';
+import { buildTipMemo } from '../../lib/stellar/validation';
+import { validateAmount, validateAsset, validateMemo, validateWallet } from './payment.validator';
 /**
 
  * Columns required to build a TipResponse.
@@ -118,7 +119,7 @@ export class PaymentService extends BaseService {
     return this.executeWithLogging('payment.createTip', async () => {
       // Validate amount at the service boundary as well, so callers that bypass
       // the route layer (jobs, internal tooling) cannot create bad records.
-      const amountCheck = validatePaymentAmount(data.amount);
+      const amountCheck = validateAmount(data.amount);
       if (!amountCheck.valid) {
         throw new ValidationError(amountCheck.reason || 'Amount must be greater than 0');
       }
@@ -141,16 +142,15 @@ export class PaymentService extends BaseService {
         throw new ValidationError('Creator account must be verified to receive tips');
       }
 
-      const requestedAsset = data.assetId
-        ? await this.prisma.stellarAsset.findFirst({ where: { id: data.assetId, enabled: true } })
-        : await this.prisma.stellarAsset.findFirst({
-            where: { enabled: true, code: 'USDC' },
-            orderBy: { priority: 'desc' },
-          });
-      if (data.assetId && !requestedAsset) {
-        logger.warn({ userId, assetId: data.assetId, failureReason: 'asset_unavailable' }, 'Tip blocked: requested asset is unavailable');
-        throw new InvalidCurrencyError(data.assetId ?? 'unknown', { assetId: data.assetId });
+      const assetCheck = await validateAsset(this.prisma, data.assetId ?? undefined);
+      if (!assetCheck.valid) {
+        if (data.assetId) {
+          logger.warn({ userId, assetId: data.assetId, failureReason: 'asset_unavailable' }, 'Tip blocked: requested asset is unavailable');
+          throw new InvalidCurrencyError(data.assetId, { assetId: data.assetId });
+        }
+        throw new ValidationError(assetCheck.reason || 'No enabled payment asset available');
       }
+      const requestedAsset = assetCheck.asset;
 
       // Verify sender is not tipping themselves
       const sender = await this.prisma.user.findUnique({
@@ -166,33 +166,16 @@ export class PaymentService extends BaseService {
         throw new ValidationError('Cannot tip yourself');
       }
 
-      // Verify sender wallet is verified
-      const wallet = await this.prisma.wallet.findFirst({
-        where: {
-          userId,
-          verified: true,
-        },
-        select: { id: true, publicKey: true },
-      });
-
-      if (!wallet) {
-        throw new ValidationError('User does not have a verified wallet');
+      // Verify sender wallet is verified and eligible to send payments
+      const walletCheck = await validateWallet(this.prisma, userId);
+      if (!walletCheck.valid) {
+        if (walletCheck.flagged) {
+          logger.warn({ userId, walletPublicKey: walletCheck.wallet?.publicKey, failureReason: 'wallet_flagged' }, 'Tip blocked: sender wallet is flagged');
+          throw new PaymentDeclinedError('Payment cannot be processed at this time', { reason: 'wallet_flagged' });
+        }
+        throw new ValidationError(walletCheck.reason || 'User does not have a verified wallet');
       }
-
-      // #36 - Block payments from flagged wallets (medium/high/critical severity)
-      const walletFlag = await this.prisma.walletFlag.findFirst({
-        where: {
-          address: wallet.publicKey,
-          resolved: false,
-          severity: { in: ['medium', 'high', 'critical'] },
-        },
-        select: { id: true },
-      });
-
-      if (walletFlag) {
-        logger.warn({ userId, walletPublicKey: wallet.publicKey, failureReason: 'wallet_flagged' }, 'Tip blocked: sender wallet is flagged');
-        throw new PaymentDeclinedError('Payment cannot be processed at this time', { reason: 'wallet_flagged' });
-      }
+      const walletPublicKey = walletCheck.wallet!.publicKey;
 
       // #36 - Block payments to frozen creator accounts
       const now = new Date();
@@ -231,10 +214,10 @@ export class PaymentService extends BaseService {
       const assetCode = requestedAsset?.code ?? 'USDC';
       let walletBalances: { lumens: string; usdc?: string };
       try {
-        walletBalances = await getWalletBalance(wallet.publicKey);
+        walletBalances = await getWalletBalance(walletPublicKey);
       } catch (err) {
         logger.error(
-          { userId, walletPublicKey: wallet.publicKey, failureReason: 'balance_check_failed' },
+          { userId, walletPublicKey, failureReason: 'balance_check_failed' },
           'Tip blocked: failed to fetch on-chain wallet balance'
         );
         throw new ServiceUnavailableError('Unable to verify wallet balance at this time');
@@ -247,7 +230,7 @@ export class PaymentService extends BaseService {
         logger.warn(
           {
             userId,
-            walletPublicKey: wallet.publicKey,
+            walletPublicKey,
             requiredAmount: data.amount,
             currentBalance,
             currency: assetCode,

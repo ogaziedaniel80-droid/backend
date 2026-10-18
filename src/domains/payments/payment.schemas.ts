@@ -6,11 +6,11 @@ import {
   MEMO_MAX_LENGTH,
   isValidAssetCode,
   isValidStellarPublicKey,
-  validateMemo,
 } from '../../lib/stellar/validation';
 import { zodToJsonSchema } from '../../utils/zod-to-json-schema';
 import { TIP_TEXT_SEARCH_MAX_LENGTH } from './tip-filters';
 import { MAX_MEDIA_PER_TIP } from '../media/media.types';
+import { validateMemo } from './payment.validator';
 
 /**
  * Request schemas for the payments domain.
