@@ -101,14 +101,16 @@ export const registerPaymentRoutes = (app: FastifyInstance, prisma: PrismaClient
               success: { type: 'boolean' },
               data: {
                 type: 'object',
-                properties: {
-                  id: { type: 'string' },
-                  creatorId: { type: 'string' },
-                  amount: { type: 'number' },
-                  status: { type: 'string' },
-                  createdAt: { type: 'string' },
-                  media: tipMediaResponseSchema,
-                },
+            properties: {
+              id: { type: 'string' },
+              creatorId: { type: 'string' },
+              amount: { type: 'number' },
+              fee: { type: 'number' },
+              totalAmount: { type: 'number' },
+              status: { type: 'string' },
+              createdAt: { type: 'string' },
+              media: tipMediaResponseSchema,
+            },
               },
             },
           },
@@ -324,6 +326,50 @@ export const registerPaymentRoutes = (app: FastifyInstance, prisma: PrismaClient
       );
 
       reply.code(200).send(formatSuccess(result));
+    }
+  );
+
+  /**
+   * GET /api/v1/transactions/:id/preview
+   * Estimate the Stellar transaction fee and total cost (tip + fee) for a tip
+   * before the sender confirms the payment.
+   * Requires: authenticated user (must be the tip sender)
+   */
+  app.get<{ Params: { id: string } }>(
+    '/api/v1/transactions/:id/preview',
+    {
+      preHandler: [authMiddleware, validateRequest({ params: TipIdParamsSchema })],
+      schema: {
+        params: tipIdParamsJsonSchema,
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              success: { type: 'boolean' },
+              data: {
+                type: 'object',
+                properties: {
+                  tipId: { type: 'string' },
+                  amount: { type: 'number' },
+                  fee: { type: 'number' },
+                  totalAmount: { type: 'number' },
+                },
+              },
+            },
+          },
+          401: { description: 'Unauthorized' },
+          404: { description: 'Tip not found' },
+        },
+      },
+    },
+    async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+      const user = request.user;
+      if (!user) {
+        throw new UnauthorizedError('Authentication required');
+      }
+
+      const result = await paymentService.getTipPreview(request.params.id, user.userId);
+      reply.send(formatSuccess(result));
     }
   );
 

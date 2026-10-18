@@ -13,6 +13,7 @@ vi.mock('../../../lib/stellar/transactions', () => ({
   buildPaymentTransaction: vi.fn(),
   submitSignedTransaction: vi.fn(),
   checkTransactionStatus: vi.fn(),
+  estimateTransactionFee: vi.fn().mockResolvedValue({ fee: 100, baseFee: 100, operationCount: 1 }),
 }));
 
 // Stub getWalletBalance so balance checks don't hit the network.

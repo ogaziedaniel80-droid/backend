@@ -90,3 +90,47 @@ Provider calls are retried with exponential backoff for transient failures
 - `Payment` — the payment record (provider ref, amount, currency, status, method).
 - `PaymentEvent` — append-only audit trail; `providerEventId` is unique.
 - `Refund` — refund records with their own idempotency key.
+
+## Stellar transaction fees
+
+Every Stellar payment incurs a network transaction fee, paid by the sender in
+stroops (1 XLM = 10_000_000 stroops). Dorisio calculates the fee from current
+network conditions so the sender can see the total cost (tip + fee) before
+confirming the payment.
+
+### Fee calculation
+
+The fee is implemented in `src/lib/stellar/transactions.ts` via
+`estimateTransactionFee`:
+
+```
+fee = baseFee * operationCount
+```
+
+- `baseFee` is the base fee (in stroops per operation) from the latest closed
+  ledger, read through Horizon (`StellarClient.getNetworkStatus`).
+- `operationCount` is the number of operations in the transaction (1 for a
+  simple payment).
+- If Horizon is unreachable (or the circuit breaker is open), the estimate
+  falls back to `StellarSdk.BASE_FEE` (100 stroops) so a conservative value is
+  still returned instead of failing the request.
+
+### Accuracy
+
+`buildPaymentTransaction` builds each transaction with the same live base fee
+that `estimateTransactionFee` reports, so the transaction's `max_fee` equals
+the fee actually charged on-chain. The estimate returned to the client
+therefore matches the actual on-chain fee.
+
+### Where the fee is exposed
+
+| Endpoint                              | Fee fields                                     |
+| ------------------------------------- | ---------------------------------------------- |
+| `POST /api/v1/transactions/tip`       | `fee`, `totalAmount` (amount + fee)            |
+| `GET /api/v1/transactions/:id/preview`| `fee`, `totalAmount` (before confirming)       |
+| `POST /api/v1/transactions/:id/build` | `fee`, `totalAmount` (transaction envelope)    |
+
+`totalAmount` is the total cost to the sender: the tip amount plus the network
+fee. Both values are returned alongside every payment creation response so the
+frontend can show the total cost before the user signs and submits the
+transaction.

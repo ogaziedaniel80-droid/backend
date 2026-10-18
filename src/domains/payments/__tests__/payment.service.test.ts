@@ -11,6 +11,7 @@ vi.mock('../../../lib/stellar/transactions', () => ({
   buildPaymentTransaction: vi.fn(),
   submitSignedTransaction: vi.fn(),
   checkTransactionStatus: vi.fn(),
+  estimateTransactionFee: vi.fn().mockResolvedValue({ fee: 100, baseFee: 100, operationCount: 1 }),
 }));
 
 // Stub getWalletBalance so tests stay hermetic (no Stellar network).
@@ -148,6 +149,8 @@ describe('PaymentService.createTip — balance checks (#175)', () => {
     const result = await service.createTip(userId, { creatorId, amount: 25 });
 
     expect(result.id).toBe('tip-exact');
+    expect(result.fee).toBe(100);
+    expect(result.totalAmount).toBe(125);
     expect(mockPrisma.tip.create).toHaveBeenCalledTimes(1);
   });
 });

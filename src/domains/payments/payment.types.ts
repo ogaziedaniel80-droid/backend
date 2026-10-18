@@ -89,6 +89,10 @@ export interface TipResponse {
   fromUserId: string;
   creatorId: string;
   amount: number;
+  /** Stellar network transaction fee, in stroops (#187). Only set on creation/preview responses. */
+  fee?: number;
+  /** Total cost to the sender: tip amount plus network fee (#187). Only set on creation/preview responses. */
+  totalAmount?: number;
   message: string | null;
   status: TipStatusType;
   transactionHash: string | null;
@@ -118,6 +122,7 @@ export interface BuildTransactionResponse {
   transactionEnvelope: string;
   tipId: string;
   fee: number;
+  totalAmount: number;
 }
 
 /**
@@ -127,4 +132,15 @@ export interface SubmitTransactionResponse {
   tipId: string;
   transactionHash: string;
   status: TipStatusType;
+}
+
+/**
+ * Response type for the tip preview endpoint: the fee estimate and total cost
+ * shown to the sender before they confirm the payment (#187).
+ */
+export interface TipPreviewResponse {
+  tipId: string;
+  amount: number;
+  fee: number;
+  totalAmount: number;
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Keypair, MemoText } from '@stellar/stellar-sdk';
-import { buildPaymentTransaction } from './transactions';
+import { buildPaymentTransaction, estimateTransactionFee } from './transactions';
 import { MEMO_MAX_LENGTH } from './validation';
 
 const sender = Keypair.random().publicKey();
@@ -11,13 +11,14 @@ const recipient = Keypair.random().publicKey();
 vi.mock('./client', async () => {
   const sdk = await import('@stellar/stellar-sdk');
   return {
-    getStellarClient: () => ({
-      getServer: () => ({
-        loadAccount: async (publicKey: string) => new sdk.Account(publicKey, '1'),
+      getStellarClient: () => ({
+        getServer: () => ({
+          loadAccount: async (publicKey: string) => new sdk.Account(publicKey, '1'),
+        }),
+        getNetworkPassphrase: () => sdk.Networks.TESTNET,
+        getNetworkType: () => 'testnet',
+        getNetworkStatus: async () => ({ baseFee: 100, ledgerVersion: 1 }),
       }),
-      getNetworkPassphrase: () => sdk.Networks.TESTNET,
-      getNetworkType: () => 'testnet',
-    }),
   };
 });
 
@@ -44,5 +45,25 @@ describe('buildPaymentTransaction memo limit (#180)', () => {
     await expect(buildPaymentTransaction(payment('é'.repeat(15)))).rejects.toThrow(
       `Memo text must be ${MEMO_MAX_LENGTH} bytes or less`
     );
+  });
+});
+
+describe('estimateTransactionFee (#187)', () => {
+  it('returns baseFee * operationCount from the latest ledger', async () => {
+    const estimate = await estimateTransactionFee(1);
+    expect(estimate).toEqual({ fee: 100, baseFee: 100, operationCount: 1 });
+  });
+
+  it('scales the fee with the operation count', async () => {
+    const estimate = await estimateTransactionFee(3);
+    expect(estimate.fee).toBe(300);
+    expect(estimate.baseFee).toBe(100);
+    expect(estimate.operationCount).toBe(3);
+  });
+
+  it('defaults to a single operation', async () => {
+    const estimate = await estimateTransactionFee();
+    expect(estimate.operationCount).toBe(1);
+    expect(estimate.fee).toBe(estimate.baseFee);
   });
 });

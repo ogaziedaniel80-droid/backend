@@ -20,6 +20,52 @@ export interface SignedTransaction {
 }
 
 /**
+ * Estimated cost of submitting a transaction to the Stellar network.
+ *
+ * `fee` is the total fee in stroops (base fee × operation count). The base fee
+ * is read from the latest closed ledger via Horizon so the estimate tracks
+ * current network conditions; if Horizon is unavailable we fall back to
+ * `BASE_FEE` (100 stroops) so callers can still render a conservative estimate.
+ */
+export interface FeeEstimate {
+  /** Total estimated transaction fee, in stroops. */
+  fee: number;
+  /** Current network base fee, in stroops per operation. */
+  baseFee: number;
+  /** Number of operations the estimate is based on. */
+  operationCount: number;
+}
+
+/**
+ * Estimate the transaction fee based on current network conditions.
+ *
+ * The fee is `baseFee * operationCount`, where `baseFee` is the base fee from
+ * the latest closed ledger (Horizon). Falls back to `StellarSdk.BASE_FEE` when
+ * the network is unreachable, so callers always get a usable estimate.
+ *
+ * @param operationCount Number of operations in the transaction (default: 1 payment)
+ * @returns Fee estimate including the base fee and total fee in stroops
+ */
+export async function estimateTransactionFee(
+  operationCount = 1
+): Promise<FeeEstimate> {
+  try {
+    const client = getStellarClient();
+    const { baseFee = StellarSdk.BASE_FEE } = await client.getNetworkStatus();
+    const resolvedBaseFee = Math.max(1, Math.floor(Number(baseFee)));
+    const fee = resolvedBaseFee * operationCount;
+    return { fee, baseFee: resolvedBaseFee, operationCount };
+  } catch (error) {
+    logger.warn(
+      'Failed to fetch network fee conditions; falling back to BASE_FEE',
+      { error }
+    );
+    const baseFee = Math.max(1, Math.floor(Number(StellarSdk.BASE_FEE)));
+    return { fee: baseFee * operationCount, baseFee, operationCount };
+  }
+}
+
+/**
  * Build a payment transaction using USDC or native lumens
  * Returns an unsigned transaction that can be signed by the client wallet (Freighter)
  *
@@ -61,9 +107,13 @@ export async function buildPaymentTransaction(data: PaymentTransactionData): Pro
       throw error;
     }
 
+    // Calculate the fee based on current network conditions so the transaction's
+    // max_fee matches the fee actually charged on-chain (#187).
+    const { baseFee: networkBaseFee } = await estimateTransactionFee(1);
+
     // Build transaction
     let builder = new StellarSdk.TransactionBuilder(senderAccount as any, {
-      fee: StellarSdk.BASE_FEE, // 100 stroops
+      fee: String(networkBaseFee),
       networkPassphrase: networkPassphrase,
       timebounds: {
         minTime: 0,

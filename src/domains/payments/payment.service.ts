@@ -7,6 +7,7 @@ import {
   TipStatus,
   BuildTransactionResponse,
   SubmitTransactionResponse,
+  TipPreviewResponse,
 } from './payment.types';
 import {
   ValidationError,
@@ -19,7 +20,7 @@ import {
   PaymentRequiredError,
   ServiceUnavailableError,
 } from '../../utils/errors';
-import { buildPaymentTransaction, submitSignedTransaction } from '../../lib/stellar/transactions';
+import { buildPaymentTransaction, submitSignedTransaction, estimateTransactionFee } from '../../lib/stellar/transactions';
 import { getWalletBalance } from '../../lib/stellar/wallet';
 import { logger } from '../../utils/logger';
 import { sanitizePageSize, sanitizePageNumber, parseSortParameters } from '../../utils/pagination';
@@ -123,6 +124,12 @@ export class PaymentService extends BaseService {
         throw new ValidationError(amountCheck.reason || 'Amount must be greater than 0');
       }
 
+      // #187 — Estimate the Stellar network fee based on current network
+      // conditions so the sender sees the total cost (tip + fee) before
+      // confirming the payment. Falls back to BASE_FEE if Horizon is unavailable.
+      const feeEstimate = await estimateTransactionFee(1);
+      const totalAmount = data.amount + feeEstimate.fee;
+
       // Verify creator exists, is public, and is verified
       const creator = await this.prisma.creator.findUnique({
         where: { id: data.creatorId },
@@ -223,7 +230,7 @@ export class PaymentService extends BaseService {
             throw new ConflictError('Idempotency key already used by another user');
           }
           logger.info(`Idempotent tip creation replayed for key ${data.idempotencyKey}`);
-          return this.formatTipResponse(existing);
+          return this.formatTipResponse(existing, feeEstimate.fee, totalAmount);
         }
       }
 
@@ -310,7 +317,7 @@ export class PaymentService extends BaseService {
               throw new ConflictError('Idempotency key already used by another user');
             }
             logger.info(`Idempotent tip creation replayed for key ${data.idempotencyKey}`);
-            return this.formatTipResponse(existing);
+            return this.formatTipResponse(existing, feeEstimate.fee, totalAmount);
           }
         }
         throw error;
@@ -335,7 +342,7 @@ export class PaymentService extends BaseService {
         logger.info(`Tip ${tip.id} attached ${attachableMedia.length} media item(s)`);
       }
 
-      return this.formatTipResponse(tip);
+      return this.formatTipResponse(tip, feeEstimate.fee, totalAmount);
     });
   }
 
@@ -1081,15 +1088,60 @@ export class PaymentService extends BaseService {
 
         logger.debug(`Payment transaction built for tip: ${tipId}`);
 
+        // #187 — Fee based on current network conditions; uses the same base fee
+        // used to build the transaction, so the displayed fee equals the on-chain fee.
+        const feeEstimate = await estimateTransactionFee(1);
+
         return {
           transactionEnvelope: transactionEnvelope,
           tipId,
-          fee: 100, // Base fee in stroops
+          fee: feeEstimate.fee,
+          totalAmount: Number(amount) + feeEstimate.fee,
         };
       } catch (error) {
         logger.error({ userId: tip.fromUserId, tipId, failureReason: 'build_failed', cause: (error as Error).message }, 'Failed to build payment transaction');
         throw new PaymentDeclinedError('Failed to build payment transaction', { tipId });
       }
+    });
+  }
+
+  /**
+   * Preview the estimated cost of a tip before the sender confirms the payment.
+   * Returns the fee estimate and total cost (tip + fee) based on current
+   * network conditions. Only the tip sender may preview.
+   *
+   * @param tipId The tip to preview
+   * @param userId The authenticated user (must be the tip sender)
+   * @returns Fee estimate and total amount
+   */
+  async getTipPreview(
+    tipId: string,
+    userId: string
+  ): Promise<TipPreviewResponse> {
+    return this.executeWithLogging('payment.previewTip', async () => {
+      const tip = await this.prisma.tip.findUnique({
+        where: { id: tipId },
+        select: { id: true, fromUserId: true, amount: true, status: true },
+      });
+
+      if (!tip) {
+        throw new NotFoundError('Tip');
+      }
+
+      if (tip.fromUserId !== userId) {
+        throw new UnauthorizedError('Only the tip sender can preview the payment');
+      }
+
+      // #187 — Fee estimate based on current network conditions; matches the
+      // fee used when the transaction is built, so it equals the on-chain fee.
+      const feeEstimate = await estimateTransactionFee(1);
+
+      return {
+        tipId: tip.id,
+        amount: tip.amount,
+        fee: feeEstimate.fee,
+        totalAmount: tip.amount + feeEstimate.fee,
+      };
     });
   }
 
@@ -1347,26 +1399,32 @@ export class PaymentService extends BaseService {
   /**
    * Format database tip record to response DTO
    */
-  private formatTipResponse(tip: {
-    id: string;
-    fromUserId: string;
-    creatorId: string;
-    amount: number;
-    message: string | null;
-    status: string;
-    transactionHash?: string | null;
-    createdAt: Date;
-    updatedAt: Date;
-    media?: any[];
-    assetCode?: string | null;
-    assetIssuer?: string | null;
-    assetDecimals?: number | null;
-  }): TipResponse {
+  private formatTipResponse(
+    tip: {
+      id: string;
+      fromUserId: string;
+      creatorId: string;
+      amount: number;
+      message: string | null;
+      status: string;
+      transactionHash?: string | null;
+      createdAt: Date;
+      updatedAt: Date;
+      media?: any[];
+      assetCode?: string | null;
+      assetIssuer?: string | null;
+      assetDecimals?: number | null;
+    },
+    fee?: number,
+    totalAmount?: number
+  ): TipResponse {
     return {
       id: tip.id,
       fromUserId: tip.fromUserId,
       creatorId: tip.creatorId,
       amount: tip.amount,
+      fee,
+      totalAmount,
       message: tip.message,
       status: tip.status as TipResponse['status'],
       transactionHash: tip.transactionHash || null,
